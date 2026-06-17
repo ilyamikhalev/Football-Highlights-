@@ -1,104 +1,106 @@
-from ultralytics import YOLO  
-import cv2
+"""
+Scoreboard cropper — uses YOLOv8 to track and crop the scoreboard region
+across all frames, producing a processed video for OCR.
+
+Usage
+-----
+  python gen_reels.py <input_video.mp4> [output_video.mp4]
+"""
+
+import argparse
 import math
-model = YOLO("yolov8s.pt")  
+import cv2
+from ultralytics import YOLO
+
+model = YOLO("yolov8s.pt")
 
 
-
-def boxCenter(coords):
-    [left, top, right, bottom] = coords
-    return [(left+right)/2,(top+bottom)/2]
-
-def closestBox(boxes, coords):
-    distance = []
-    center = boxCenter(coords)
-    for box in boxes:
-        boxCent = boxCenter(box.xyxy[0].numpy().astype(int))
-        distance.append(math.dist(boxCent,center))
-    return boxes[distance.index(min(distance))]
+def box_center(coords):
+    left, top, right, bottom = coords
+    return [(left + right) / 2, (top + bottom) / 2]
 
 
-def adjustBoxSize(coords, box_width, box_height):
-    [centerX, centerY] = boxCenter(coords)
-    return [centerX-box_width/2, centerY-box_height/2, centerX+box_width/2, centerY+box_height/2]
+def closest_box(boxes, coords):
+    center = box_center(coords)
+    distances = [math.dist(box_center(b.xyxy[0].numpy().astype(int)), center) for b in boxes]
+    return boxes[distances.index(min(distances))]
 
 
+def adjust_box_size(coords, box_width, box_height):
+    cx, cy = box_center(coords)
+    return [cx - box_width / 2, cy - box_height / 2, cx + box_width / 2, cy + box_height / 2]
 
-def adjustBoundaries(coords, screen):
-    [left, top, right, bottom] = coords
-    [width, height]=screen
-    if left<0:
-        right=right-left
-        left=0
-    if top<0:
-        bottom=bottom-top
-        top=0
-    if right>width:
-        left=left-(right-width)
-        right=width
-    if bottom>height:
-        top=top-(bottom-height)
-        bottom=height
+
+def adjust_boundaries(coords, screen_w, screen_h):
+    left, top, right, bottom = coords
+    if left < 0:
+        right -= left
+        left = 0
+    if top < 0:
+        bottom -= top
+        top = 0
+    if right > screen_w:
+        left -= right - screen_w
+        right = screen_w
+    if bottom > screen_h:
+        top -= bottom - screen_h
+        bottom = screen_h
     return [round(left), round(top), round(right), round(bottom)]
 
 
+def crop_scoreboard(file_source, file_target, crop_coords=None):
+    vid = cv2.VideoCapture(file_source)
+    fps = vid.get(cv2.CAP_PROP_FPS)
+    width = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-fileSource = 'highlights (online-video-cutter.com).mp4' 
-fileTarget = 'test_vide0_processed.mp4' 
-cropCoords = [100,100,500,500] 
+    if crop_coords:
+        left, top, right, bottom = crop_coords
+        left = max(0, left)
+        top = max(0, top)
+        right = min(width, right)
+        bottom = min(height, bottom)
+    else:
+        left, top, right, bottom = 0, 0, width, height
+
+    box_width = right - left
+    box_height = bottom - top
+    last_coords = [left, top, right, bottom]
+
+    writer = cv2.VideoWriter(
+        file_target, cv2.VideoWriter_fourcc(*'MPEG'), fps, (box_width, box_height)
+    )
+
+    frame_n = 1
+    while True:
+        ret, frame = vid.read()
+        if not ret:
+            print("Done.")
+            break
+        print(f"Frame: {frame_n}")
+        frame_n += 1
+
+        results = model.predict(source=frame, conf=0.3, iou=0.2, device='0')
+        boxes = results[0].boxes
+        if boxes is not None and len(boxes):
+            box = closest_box(boxes, last_coords)
+            last_coords = box.xyxy[0].numpy().astype(int)
+            new_coords = adjust_box_size(last_coords, box_width, box_height)
+            left, top, right, bottom = adjust_boundaries(new_coords, width, height)
+
+        cropped = frame[top:bottom, left:right]
+        writer.write(cropped)
+
+    vid.release()
+    writer.release()
 
 
-vidCapture = cv2.VideoCapture(fileSource)
-fps = vidCapture.get(cv2.CAP_PROP_FPS)
-totalFrames = vidCapture.get(cv2.CAP_PROP_FRAME_COUNT)
-width = int(vidCapture.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(vidCapture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-if not cropCoords:
-    [box_left, box_top, box_right, box_bottom] = [0, 0, width, height]
-else:
-    [box_left, box_top, box_right, box_bottom] = cropCoords
-    if (box_left<0):
-        box_left=0
-    if (box_top<0):
-        box_top=0
-    if (box_right)>width:
-        box_right=width
-    if (box_bottom>height):
-        box_bottom=height
-lastCoords = [box_left, box_top, box_right, box_bottom]
-lastBoxCoords = lastCoords
-box_width = box_right-box_left
-box_height = box_bottom-box_top
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Crop scoreboard region from match video")
+    parser.add_argument("input", help="Input match video")
+    parser.add_argument("output", nargs="?", default="processed.mp4", help="Output cropped video")
+    parser.add_argument("--crop", nargs=4, type=int, metavar=("LEFT", "TOP", "RIGHT", "BOTTOM"),
+                        help="Initial crop box (pixels)")
+    args = parser.parse_args()
 
-
-outputWriter = cv2.VideoWriter(fileTarget, cv2.VideoWriter_fourcc(*'MPEG'), fps, (box_width, box_height))
-
-
-frameCounter = 1
-while True:
-
-    r, im = vidCapture.read()
-
-    if not r:
-        print("Video Finished!")
-        break
-
-    print("Frame: "+str(frameCounter))
-    frameCounter = frameCounter+1
-    results = model.predict(source=im, conf=0.3, iou=0.2, device='0') 
-    #print(results)
-    boxes = results[0].boxes 
-    box = closestBox(boxes, lastBoxCoords) 
-    if box is not None:
-        lastBoxCoords = box.xyxy[0].numpy().astype(int) 
-
-        newCoords = adjustBoxSize(box.xyxy[0].numpy().astype(int), box_width, box_height)
-        newCoords = adjustBoundaries(newCoords,[width, height])     
-        [box_left, box_top, box_right, box_bottom] = newCoords
-        imCropped = im[box_top:box_bottom, box_left:box_right]
-
-        outputWriter.write(imCropped) 
-
-    
-vidCapture.release()
-outputWriter.release()
+    crop_scoreboard(args.input, args.output, args.crop)
